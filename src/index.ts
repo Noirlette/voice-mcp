@@ -329,7 +329,7 @@ function getPlayerHTML(botName: string): string {
 // MiniMax API Helper
 // =============================================================================
 
-async function generateAudio(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio_base64?: string; error?: string }> {
+async function generateAudio(env: Env, text: string, emotion?: string, speed?: number): Promise<{ success: boolean; audio_base64?: string; error?: string }> {
   try {
     const t2aUrl = `https://api.minimaxi.com/v1/t2a_v2?GroupId=${env.MINIMAX_GROUP_ID}`;
     
@@ -345,7 +345,7 @@ async function generateAudio(env: Env, text: string, emotion?: string): Promise<
         stream: false,
         voice_setting: {
           voice_id: env.VOICE_ID,
-          speed: 1.0,
+          speed: (typeof speed === 'number' && speed >= 0.5 && speed <= 2.0) ? speed : 1.0,
           vol: 1.0,
           pitch: 0,
           ...(emotion ? { emotion } : {}),
@@ -426,14 +426,15 @@ function createVoiceServer(env: Env): McpServer {
       inputSchema: z.object({
         text: z.string().describe("Text to speak"),
         emotion: z.enum(["happy", "sad", "angry", "fearful", "disgusted", "surprised", "neutral"]).optional().describe("Emotion of the voice (optional; omit for default delivery)"),
+        speed: z.number().min(0.5).max(2).optional().describe("Speech speed (optional, default 1.0; 0.8 = lazy/sleepy, 1.1 = excited)"),
       }),
       _meta: {
         ui: { resourceUri: VOICE_RESOURCE_URI },
         "ui/resourceUri": VOICE_RESOURCE_URI,
       },
     },
-    async ({ text, emotion }) => {
-      const result = await generateAudio(env, text, emotion);
+    async ({ text, emotion, speed }) => {
+      const result = await generateAudio(env, text, emotion, speed);
       
       if (result.success && result.audio_base64) {
         return {
@@ -496,7 +497,7 @@ export default {
       return Response.json({
         status: 'ok',
         service: 'voice-mcp',
-        version: '1.1.0',
+        version: '1.2.0',
         voice_id: env.VOICE_ID ? 'configured' : 'not configured',
       }, { headers: corsHeaders });
     }
@@ -514,8 +515,10 @@ export default {
       const emotionParam = url.searchParams.get('emotion');
       const VALID_EMOTIONS = ['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'neutral'];
       const emotion = emotionParam && VALID_EMOTIONS.includes(emotionParam) ? emotionParam : undefined;
+      const speedParam = parseFloat(url.searchParams.get('speed') || '');
+      const speed = (speedParam >= 0.5 && speedParam <= 2.0) ? speedParam : undefined;
 
-      const result = await generateAudio(env, text, emotion);
+      const result = await generateAudio(env, text, emotion, speed);
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
