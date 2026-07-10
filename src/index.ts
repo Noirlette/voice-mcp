@@ -329,7 +329,7 @@ function getPlayerHTML(botName: string): string {
 // MiniMax API Helper
 // =============================================================================
 
-async function generateAudio(env: Env, text: string): Promise<{ success: boolean; audio_base64?: string; error?: string }> {
+async function generateAudio(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio_base64?: string; error?: string }> {
   try {
     const t2aUrl = `https://api.minimaxi.com/v1/t2a_v2?GroupId=${env.MINIMAX_GROUP_ID}`;
     
@@ -348,6 +348,7 @@ async function generateAudio(env: Env, text: string): Promise<{ success: boolean
           speed: 1.0,
           vol: 1.0,
           pitch: 0,
+          ...(emotion ? { emotion } : {}),
         },
         audio_setting: {
           sample_rate: 32000,
@@ -424,14 +425,15 @@ function createVoiceServer(env: Env): McpServer {
       description: `Make ${botName} speak with a custom cloned voice. The audio will play in an inline player.`,
       inputSchema: z.object({
         text: z.string().describe("Text to speak"),
+        emotion: z.enum(["happy", "sad", "angry", "fearful", "disgusted", "surprised", "neutral"]).optional().describe("Emotion of the voice (optional; omit for default delivery)"),
       }),
       _meta: {
         ui: { resourceUri: VOICE_RESOURCE_URI },
         "ui/resourceUri": VOICE_RESOURCE_URI,
       },
     },
-    async ({ text }) => {
-      const result = await generateAudio(env, text);
+    async ({ text, emotion }) => {
+      const result = await generateAudio(env, text, emotion);
       
       if (result.success && result.audio_base64) {
         return {
@@ -509,7 +511,11 @@ export default {
         });
       }
 
-      const result = await generateAudio(env, text);
+      const emotionParam = url.searchParams.get('emotion');
+      const VALID_EMOTIONS = ['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'neutral'];
+      const emotion = emotionParam && VALID_EMOTIONS.includes(emotionParam) ? emotionParam : undefined;
+
+      const result = await generateAudio(env, text, emotion);
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
