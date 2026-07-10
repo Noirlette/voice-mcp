@@ -496,7 +496,7 @@ export default {
       return Response.json({
         status: 'ok',
         service: 'voice-mcp',
-        version: '1.0.0',
+        version: '1.1.0',
         voice_id: env.VOICE_ID ? 'configured' : 'not configured',
       }, { headers: corsHeaders });
     }
