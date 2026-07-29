@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+# ⚠️ 这个仓从建起来就没跟踪过 package-lock.json，部署走 npx wrangler deploy。
+# 2026-07-30 把它显式挡掉，只是为了让跳板机的工作区不再永远「脏」——
+# 一个永远脏的仓库，会把「脏就停下喊人」那道保险叫成狼来了。
+# 想让依赖可复现的话，该做的是**跟踪**它而不是挡它：在跳板机上
+# git add -f package-lock.json 提交一次即可（那台机器上那份才是真正在跑的）。
+package-lock.json
+
+# wrangler 本地状态与密钥
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+
+# 备份（改前先 cp 一份的习惯，两种写法都挡）
+*.bak
+*.bak-*
+*.bak_*
+
+# 临时
+*.log
