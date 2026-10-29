@@ -477,8 +477,12 @@ async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: st
   for (let i = 0; i < VERIFY_TAKES; i++) {
     const t = await once();
     const got = await sttWords(env, t.bytes);
-    const sc = takeScore(expected, got);
-    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected.length} 词，转写 ${got ? got.length : null}，分 ${sc == null ? '不验' : sc.toFixed(2)}`);
+    let sc = takeScore(expected, got);
+    // 字都对、却在省略号上停太久（同一条正常 16 秒，拖成 32 秒、一大段一大段空白）：转写看不出空白，按时长补一刀。
+    // 这种写法正常每词 0.5~0.65 秒；上限每词 0.95 秒再加 3 秒。mp3_44100_128 是定码率，字节 / 16000 ＝ 秒。
+    const secs = t.bytes.byteLength / 16000, cap = expected.length * 0.95 + 3;
+    if (sc != null && expected.length >= 4 && secs > cap) sc += (secs - cap) / cap;
+    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected.length} 词，转写 ${got ? got.length : null}，${secs.toFixed(1)} 秒（上限 ${cap.toFixed(1)}），分 ${sc == null ? '不验' : sc.toFixed(2)}`);
     if (sc == null || sc === 0) return t;
     if (sc < bestScore) { best = t; bestScore = sc; }
   }
