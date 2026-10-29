@@ -451,7 +451,7 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
 // 手机在要插吻的地方放 ␟（␟），这里换成一段停顿、一次念完，再按 with-timestamps 的逐字时间
 // 算出每个停顿的中点交回去，手机在那儿剪开插吻。
 const MARK = '␟';
-const MARK_PAUSE = ' ...... ';
+const MARK_PAUSE = '\n';
 async function generateElevenMarked(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio?: string; cuts?: number[]; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   const pieces = String(text || '').split(MARK).map(p => toElevenText(p));
