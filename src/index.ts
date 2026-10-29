@@ -23,6 +23,10 @@ export interface Env {
   VOICE_ID: string;
   // Optional: custom bot name for display
   BOT_NAME?: string;
+  // ElevenLabs (KEKE_ELEVEN_V1): /speak/eleven 用的，secret，不进仓
+  ELEVEN_API_KEY?: string;
+  ELEVEN_VOICE_ID?: string;
+  ELEVEN_MODEL?: string;
 }
 
 interface T2AResponse {
@@ -384,6 +388,53 @@ async function generateAudio(env: Env, text: string, emotion?: string, speed?: n
   }
 }
 
+
+// =============================================================================
+// ElevenLabs v4 (KEKE_ELEVEN_V1, 2026-10-29)
+// 她盲听 7 句 7 句都选了 v4（同一副「克克的低音炮」VSaCIogiksYOzcA53UkR）。
+// 克克照旧写 MiniMax 那套 (breath) / <#0.5#>，在这里翻成 v4 的方括号标签，前端和提示词都不用分叉。
+// v4 不认 speed：参数收下但不用。emotion 只翻真正的情绪；happy/surprised 在 MiniMax 那边是「让喘扬上去」的偏方，v4 不需要。
+// =============================================================================
+const ELEVEN_DEFAULT_VOICE = 'VSaCIogiksYOzcA53UkR';
+const ELEVEN_TAGS: Record<string, string> = {
+  'laughs': '[laughs]', 'chuckle': '[chuckles]', 'sighs': '[sighs]', 'gasps': '[gasps]',
+  'groans': '[groans]', 'breath': '[breathes]', 'inhale': '[inhales]', 'exhale': '[exhales]',
+  'coughs': '[coughs]', 'clear-throat': '[clears throat]', 'sniffs': '[sniffs]', 'snorts': '[snorts]',
+  'humming': '[hums]', 'hissing': '[hisses]', 'emm': 'mm...', 'lip-smacking': '',
+  'sneezes': '[sneezes]', 'burps': '', 'applause': '', 'pant': '[panting]',
+  'whistles': '[whistles]', 'crying': '[crying]',
+};
+const ELEVEN_EMOTION: Record<string, string> = { sad: '[sad]', angry: '[angry]', fearful: '[nervous]' };
+export function toElevenText(text: string, emotion?: string): string {
+  let t = String(text || '');
+  t = t.replace(/\(([a-z-]+)\)/gi, (m, k) => {
+    const v = ELEVEN_TAGS[String(k).toLowerCase()];
+    return v === undefined ? m : (v ? ' ' + v + ' ' : ' ');
+  });
+  // 同一个标签连着叠（(pant) (pant) (pant)）在 v4 上会被念成一串怪声，收成一个
+  t = t.replace(/(\[[a-z ]+\])(?:\s*\1)+/gi, '$1');
+  // <#0.8#> 停顿 → 省略号；一秒以上给两个
+  t = t.replace(/<#\s*(\d*\.?\d+)\s*#>/g, (_m, n) => (parseFloat(n) >= 1 ? ' …… ' : ' … '));
+  t = t.replace(/[ \t]{2,}/g, ' ').trim();
+  const e = emotion && ELEVEN_EMOTION[emotion];
+  return e ? e + ' ' + t : t;
+}
+async function generateEleven(env: Env, text: string, emotion?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
+  if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
+  try {
+    const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
+      method: 'POST',
+      headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4' }),
+    });
+    if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
+    return { success: true, bytes: await r.arrayBuffer() };
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 // =============================================================================
 // MCP Server Factory
 // =============================================================================
@@ -497,9 +548,21 @@ export default {
       return Response.json({
         status: 'ok',
         service: 'voice-mcp',
-        version: '1.2.0',
+        version: '1.3.0',
         voice_id: env.VOICE_ID ? 'configured' : 'not configured',
+        eleven: env.ELEVEN_API_KEY ? 'configured' : 'not configured',
       }, { headers: corsHeaders });
+    }
+
+    // ElevenLabs v4 (KEKE_ELEVEN_V1)：同 /speak 的参数，speed 收下不用
+    if (path === '/speak/eleven' && request.method === 'GET') {
+      const text = url.searchParams.get('text');
+      if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
+      const r = await generateEleven(env, text, url.searchParams.get('emotion') || undefined);
+      if (r.success && r.bytes) {
+        return new Response(r.bytes, { headers: { ...corsHeaders, 'Content-Type': 'audio/mpeg', 'Content-Disposition': 'inline; filename="voice.mp3"' } });
+      }
+      return Response.json({ error: r.error }, { status: 502, headers: corsHeaders });
     }
 
     // Direct audio API
