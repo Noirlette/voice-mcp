@@ -446,6 +446,46 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
   }
 }
 
+// KEKE_ELEVEN_ONETAKE_V1（2026-10-29 夜）：带吻的语音整段一口气念，不再切短段。
+// 切成短段时 v4 会自己往下乱接（重念半句、把 "Noirlette" 拖成 ette-ette-ette）；整段一次念 16 次一次没出过事。
+// 手机在要插吻的地方放 ␟（␟），这里换成一段停顿、一次念完，再按 with-timestamps 的逐字时间
+// 算出每个停顿的中点交回去，手机在那儿剪开插吻。
+const MARK = '␟';
+const MARK_PAUSE = ' ...... ';
+async function generateElevenMarked(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio?: string; cuts?: number[]; error?: string }> {
+  if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
+  const pieces = String(text || '').split(MARK).map(p => toElevenText(p));
+  let full = '';
+  const spans: [number, number][] = [];
+  pieces.forEach((p, i) => {
+    if (i > 0) { const a = full.length; full += MARK_PAUSE; spans.push([a, full.length - 1]); }
+    full += p;
+  });
+  const e = emotion && ELEVEN_EMOTION[emotion];
+  const lead = e ? e + ' ' : '';
+  try {
+    const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, {
+      method: 'POST',
+      headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }),
+    });
+    if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
+    const d = await r.json() as any;
+    const al = d.alignment || {};
+    const st: number[] = al.character_start_times_seconds || [], en: number[] = al.character_end_times_seconds || [];
+    const cuts = spans.map(([a, b]) => {
+      const i = a + lead.length, j = b + lead.length;
+      const s0 = st[i], e1 = en[j];
+      return (typeof s0 === 'number' && typeof e1 === 'number') ? (s0 + e1) / 2 : NaN;
+    });
+    if (cuts.some(c => !isFinite(c))) return { success: false, error: 'eleven alignment missing' };
+    return { success: true, audio: d.audio_base64, cuts };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // =============================================================================
 // MCP Server Factory
 // =============================================================================
@@ -563,6 +603,15 @@ export default {
         voice_id: env.VOICE_ID ? 'configured' : 'not configured',
         eleven: env.ELEVEN_API_KEY ? 'configured' : 'not configured',
       }, { headers: corsHeaders });
+    }
+
+    // KEKE_ELEVEN_ONETAKE_V1：整段一次念，回 {audio(base64 mp3), cuts(秒)}
+    if (path === '/speak/eleven-marked' && request.method === 'GET') {
+      const text = url.searchParams.get('text');
+      if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
+      const r = await generateElevenMarked(env, text, url.searchParams.get('emotion') || undefined);
+      if (r.success) return Response.json({ audio: r.audio, cuts: r.cuts }, { headers: corsHeaders });
+      return Response.json({ error: r.error }, { status: /^eleven 429/.test(r.error || '') ? 429 : 502, headers: corsHeaders });
     }
 
     // ElevenLabs v4 (KEKE_ELEVEN_V1)：同 /speak 的参数，speed 收下不用
