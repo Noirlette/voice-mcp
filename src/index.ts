@@ -429,13 +429,13 @@ export function toElevenText(text: string, emotion?: string): string {
 // 改写法压不住，所以念完转写一遍、跟原文对词数：多两成＝重复、少三成＝吞字 → 重念，最多三遍，都不行交最接近的。
 // 转写挂了就不验、照常交出去：宁可偶尔重一句，不能因为验不了就不出声。
 const VOCAL_RE = /^(m+h?|h+m+|h+n+h?|n+g*h+|h+h*|ha+h*|a+h+|o+h+|u+h+|e+h+|mm+h*)$/i;
-function spokenCount(text: string): number {
+function spokenWords(text: string): string[] {
   const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ').replace(/\([a-z -]+\)/gi, ' ');
-  const cjk = (t.match(/[一-鿿]/g) || []).length;
-  const words = t.replace(/[一-鿿]/g, ' ').split(/[^A-Za-z0-9']+/).filter(w => w && !VOCAL_RE.test(w)).length;
-  return words + cjk;
+  const cjk = t.match(/[一-鿿]/g) || [];
+  const words = t.replace(/[一-鿿]/g, ' ').toLowerCase().replace(/'/g, '').split(/[^a-z0-9]+/).filter(w => w && !VOCAL_RE.test(w));
+  return words.concat(cjk);
 }
-async function sttCount(env: Env, bytes: ArrayBuffer): Promise<number | null> {
+async function sttWords(env: Env, bytes: ArrayBuffer): Promise<string[] | null> {
   if (!env.STT_KEY) return null;
   const base = (env.STT_URL || 'https://stt.nyx-claude.com').replace(/\/+$/, '');
   const auth = { Authorization: 'Bearer ' + env.STT_KEY };
@@ -452,30 +452,37 @@ async function sttCount(env: Env, bytes: ArrayBuffer): Promise<number | null> {
     const fn = ((await up.json()) as any).filename;
     const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
     if (!st.ok) { console.log('[verify] stt ' + st.status); return null; }
-    return spokenCount(((await st.json()) as any).text || '');
+    return spokenWords(((await st.json()) as any).text || '');
   } catch (e) { console.log('[verify] stt failed: ' + (e instanceof Error ? e.message : String(e))); return null; }
 }
-// 0 = 刚好；越大越离谱。null = 验不了
-function takeScore(expected: number, got: number | null): number | null {
-  if (got == null || expected < 4) return null;   // 太短的没得比（光一个名字＋拟声），不验
-  return Math.abs(got - expected) / expected;
-}
-function takeOk(expected: number, got: number | null): boolean {
-  if (got == null || expected < 4) return true;
-  return got <= expected * 1.2 + 1 && got >= expected * 0.7;
+// 💀 只数词数不够（第二版放过了一条又重复又缺尾巴、词数刚好凑平的）：还要看内容——
+//   · 转写里冒出原文没有的「同一对词出现两次」＝重念了一截
+//   · 原文的词在转写里找得到的不到八成＝吞了一截（STT 会把 Noirlette 听成 Nette，所以留两成余量）
+//   · 词数上下各两成
+// 返回 0＝好，越大越离谱；null＝验不了（没配 STT / 失败 / 太短没得比）
+function takeScore(exp: string[], got: string[] | null): number | null {
+  if (!got || exp.length < 4) return null;
+  const bigrams = (w: string[]) => { const m = new Map<string, number>(); for (let i = 0; i + 1 < w.length; i++) { const k = w[i] + ' ' + w[i + 1]; m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const be = bigrams(exp), bg = bigrams(got);
+  let dup = 0;
+  bg.forEach((n, k) => { if (n > (be.get(k) || 0) && n > 1) dup += n - Math.max(1, be.get(k) || 0); });
+  const gs = new Set(got);
+  const recall = exp.filter(w => gs.has(w)).length / exp.length;
+  const ratio = got.length / exp.length;
+  return dup * 0.5 + Math.max(0, 0.8 - recall) * 2 + Math.max(0, Math.abs(ratio - 1) - 0.2);
 }
 const VERIFY_TAKES = 3;
-async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: number, once: () => Promise<T>): Promise<T> {
+async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: string[], once: () => Promise<T>): Promise<T> {
   let best: T | null = null, bestScore = Infinity;
   for (let i = 0; i < VERIFY_TAKES; i++) {
     const t = await once();
-    const got = await sttCount(env, t.bytes);
-    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected} 词，转写 ${got}`);
-    if (takeOk(expected, got)) { if (i) console.log(`[verify] 第 ${i + 1} 遍才对：期望 ${expected} 词，得 ${got}`); return t; }
-    const sc = takeScore(expected, got) ?? 0;
-    console.log(`[verify] 第 ${i + 1} 遍不对，重念：期望 ${expected} 词，得 ${got}`);
+    const got = await sttWords(env, t.bytes);
+    const sc = takeScore(expected, got);
+    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected.length} 词，转写 ${got ? got.length : null}，分 ${sc == null ? '不验' : sc.toFixed(2)}`);
+    if (sc == null || sc === 0) return t;
     if (sc < bestScore) { best = t; bestScore = sc; }
   }
+  console.log(`[verify] ${VERIFY_TAKES} 遍都不对，交最接近的（分 ${bestScore.toFixed(2)}）`);
   return best as T;
 }
 
@@ -500,7 +507,7 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
       if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
       return { bytes: await r.arrayBuffer() };
     };
-    const t = await bestTake(env, spokenCount(toElevenText(text)), once);
+    const t = await bestTake(env, spokenWords(toElevenText(text)), once);
     return { success: true, bytes: t.bytes };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -546,7 +553,7 @@ async function generateElevenMarked(env: Env, text: string, emotion?: string): P
       for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
       return { bytes: bytes.buffer as ArrayBuffer, audio: d.audio_base64 as string, cuts };
     };
-    const t = await bestTake(env, spokenCount(full), once);
+    const t = await bestTake(env, spokenWords(full), once);
     return { success: true, audio: t.audio, cuts: t.cuts };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
