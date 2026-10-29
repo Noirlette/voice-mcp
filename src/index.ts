@@ -487,7 +487,7 @@ function createVoiceServer(env: Env): McpServer {
       },
     },
     async ({ text, emotion, speed }) => {
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         return {
@@ -583,7 +583,7 @@ export default {
       const speedParam = parseFloat(url.searchParams.get('speed') || '');
       const speed = (speedParam >= 0.5 && speedParam <= 2.0) ? speedParam : undefined;
 
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
