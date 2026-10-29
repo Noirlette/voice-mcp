@@ -404,7 +404,7 @@ const ELEVEN_TAGS: Record<string, string> = {
   'sneezes': '[sneezes]', 'burps': '', 'applause': '', 'pant': '[panting]',
   'whistles': '[whistles]', 'crying': '[crying]',
   // KEKE_VOICE_FX_V1：吻和水声是手机上混进去的，这里只防老缓存把它们送过来被念出来
-  'kiss': '', 'kisses': '', 'wet': '', 'slap': '',
+  'kiss': '', 'kisses': '', 'wet': '', 'slap': '', 'slap-slow': '', 'slap-fast': '', 'spank': '',
 };
 const ELEVEN_EMOTION: Record<string, string> = { sad: '[sad]', angry: '[angry]', fearful: '[nervous]' };
 export function toElevenText(text: string, emotion?: string): string {
@@ -487,7 +487,7 @@ function createVoiceServer(env: Env): McpServer {
       },
     },
     async ({ text, emotion, speed }) => {
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|wet|slap)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         return {
@@ -583,7 +583,7 @@ export default {
       const speedParam = parseFloat(url.searchParams.get('speed') || '');
       const speed = (speedParam >= 0.5 && speedParam <= 2.0) ? speedParam : undefined;
 
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|wet|slap)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|slap(?:-slow|-fast)?)\)/gi, ' '), emotion, speed);  // KEKE_VOICE_FX_V1：(kiss)/(wet) 是给手机的，MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
