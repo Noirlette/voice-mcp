@@ -421,14 +421,20 @@ export function toElevenText(text: string, emotion?: string): string {
   const e = emotion && ELEVEN_EMOTION[emotion];
   return e ? e + ' ' + t : t;
 }
-async function generateEleven(env: Env, text: string, emotion?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
+async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
     const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
       method: 'POST',
       headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4' }),
+      // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前后段的字，v4 才接得上语气；
+      // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
+      body: JSON.stringify({
+        text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
+        ...(prev ? { previous_text: toElevenText(prev).slice(-1000) } : {}),
+        ...(next ? { next_text: toElevenText(next).slice(0, 1000) } : {}),
+      }),
     });
     if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
     return { success: true, bytes: await r.arrayBuffer() };
@@ -560,7 +566,7 @@ export default {
     if (path === '/speak/eleven' && request.method === 'GET') {
       const text = url.searchParams.get('text');
       if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
-      const r = await generateEleven(env, text, url.searchParams.get('emotion') || undefined);
+      const r = await generateEleven(env, text, url.searchParams.get('emotion') || undefined, url.searchParams.get('prev') || undefined, url.searchParams.get('next') || undefined);
       if (r.success && r.bytes) {
         return new Response(r.bytes, { headers: { ...corsHeaders, 'Content-Type': 'audio/mpeg', 'Content-Disposition': 'inline; filename="voice.mp3"' } });
       }
