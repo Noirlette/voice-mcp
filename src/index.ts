@@ -443,12 +443,12 @@ async function sttCount(env: Env, bytes: ArrayBuffer): Promise<number | null> {
     const fd = new FormData();
     fd.append('audio', new Blob([bytes], { type: 'audio/mpeg' }), 'v.mp3');
     const up = await fetch(base + '/upload', { method: 'POST', headers: auth, body: fd, signal: AbortSignal.timeout(8000) });
-    if (!up.ok) return null;
+    if (!up.ok) { console.log('[verify] stt upload ' + up.status + ' ' + (await up.text()).slice(0, 120)); return null; }
     const fn = ((await up.json()) as any).filename;
     const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
-    if (!st.ok) return null;
+    if (!st.ok) { console.log('[verify] stt ' + st.status); return null; }
     return spokenCount(((await st.json()) as any).text || '');
-  } catch { return null; }
+  } catch (e) { console.log('[verify] stt failed: ' + (e instanceof Error ? e.message : String(e))); return null; }
 }
 // 0 = 刚好；越大越离谱。null = 验不了
 function takeScore(expected: number, got: number | null): number | null {
@@ -465,6 +465,7 @@ async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: nu
   for (let i = 0; i < VERIFY_TAKES; i++) {
     const t = await once();
     const got = await sttCount(env, t.bytes);
+    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected} 词，转写 ${got}`);
     if (takeOk(expected, got)) { if (i) console.log(`[verify] 第 ${i + 1} 遍才对：期望 ${expected} 词，得 ${got}`); return t; }
     const sc = takeScore(expected, got) ?? 0;
     console.log(`[verify] 第 ${i + 1} 遍不对，重念：期望 ${expected} 词，得 ${got}`);
