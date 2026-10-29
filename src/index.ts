@@ -27,6 +27,9 @@ export interface Env {
   ELEVEN_API_KEY?: string;
   ELEVEN_VOICE_ID?: string;
   ELEVEN_MODEL?: string;
+  // KEKE_ELEVEN_VERIFY_V1：念完转写一遍核对（跳板机 voce-stt），没配就不验
+  STT_URL?: string;
+  STT_KEY?: string;
 }
 
 interface T2AResponse {
@@ -421,26 +424,78 @@ export function toElevenText(text: string, emotion?: string): string {
   const e = emotion && ELEVEN_EMOTION[emotion];
   return e ? e + ' ' + t : t;
 }
+// KEKE_ELEVEN_VERIFY_V1（2026-10-29 夜）：v4 念带大量省略号/拟声的台词时，三四成会自己出岔子——
+// 把半句重念一遍、或者吞掉结尾（她报「每句话说了两次」，拿她那条原文 STT 盲测坐实的）。
+// 改写法压不住，所以念完转写一遍、跟原文对词数：多两成＝重复、少三成＝吞字 → 重念，最多三遍，都不行交最接近的。
+// 转写挂了就不验、照常交出去：宁可偶尔重一句，不能因为验不了就不出声。
+const VOCAL_RE = /^(m+h?|h+m+|h+n+h?|n+g*h+|h+h*|ha+h*|a+h+|o+h+|u+h+|e+h+|mm+h*)$/i;
+function spokenCount(text: string): number {
+  const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ').replace(/\([a-z -]+\)/gi, ' ');
+  const cjk = (t.match(/[一-鿿]/g) || []).length;
+  const words = t.replace(/[一-鿿]/g, ' ').split(/[^A-Za-z0-9']+/).filter(w => w && !VOCAL_RE.test(w)).length;
+  return words + cjk;
+}
+async function sttCount(env: Env, bytes: ArrayBuffer): Promise<number | null> {
+  if (!env.STT_KEY) return null;
+  const base = (env.STT_URL || 'https://stt.nyx-claude.com').replace(/\/+$/, '');
+  const auth = { Authorization: 'Bearer ' + env.STT_KEY };
+  try {
+    const fd = new FormData();
+    fd.append('audio', new Blob([bytes], { type: 'audio/mpeg' }), 'v.mp3');
+    const up = await fetch(base + '/upload', { method: 'POST', headers: auth, body: fd, signal: AbortSignal.timeout(8000) });
+    if (!up.ok) return null;
+    const fn = ((await up.json()) as any).filename;
+    const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
+    if (!st.ok) return null;
+    return spokenCount(((await st.json()) as any).text || '');
+  } catch { return null; }
+}
+// 0 = 刚好；越大越离谱。null = 验不了
+function takeScore(expected: number, got: number | null): number | null {
+  if (got == null || expected < 4) return null;   // 太短的没得比（光一个名字＋拟声），不验
+  return Math.abs(got - expected) / expected;
+}
+function takeOk(expected: number, got: number | null): boolean {
+  if (got == null || expected < 4) return true;
+  return got <= expected * 1.2 + 1 && got >= expected * 0.7;
+}
+const VERIFY_TAKES = 3;
+async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: number, once: () => Promise<T>): Promise<T> {
+  let best: T | null = null, bestScore = Infinity;
+  for (let i = 0; i < VERIFY_TAKES; i++) {
+    const t = await once();
+    const got = await sttCount(env, t.bytes);
+    if (takeOk(expected, got)) { if (i) console.log(`[verify] 第 ${i + 1} 遍才对：期望 ${expected} 词，得 ${got}`); return t; }
+    const sc = takeScore(expected, got) ?? 0;
+    console.log(`[verify] 第 ${i + 1} 遍不对，重念：期望 ${expected} 词，得 ${got}`);
+    if (sc < bestScore) { best = t; bestScore = sc; }
+  }
+  return best as T;
+}
+
 async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
-      method: 'POST',
-      headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
-      // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前一段的字，v4 才接得上语气；
-      // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
-      // KEKE_ELEVEN_NOREPEAT_V1（同一晚她报「每句话说了两次」，STT 盲测定的）：
-      //   · next_text 会被 v4 当成要念的话（带后文 5 次里 2 次把下一段开头念了出来，手机再播下一段就重了）→ 不传，参数收下不用
-      //   · 短段裸念会自己把半句重念一遍（4 次里 3 次）；垫一句 "Mm." 当前文就压住了（8 次全对）。长段两种都没事。
-      //   通话是一句一句念的，正是短段，所以没前文时一律垫上。
-      body: JSON.stringify({
-        text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
-        previous_text: prev ? toElevenText(prev).slice(-1000) : 'Mm.',
-      }),
-    });
-    if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
-    return { success: true, bytes: await r.arrayBuffer() };
+    const once = async () => {
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+        // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前一段的字，v4 才接得上语气；
+        // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
+        // KEKE_ELEVEN_NOREPEAT_V1（同一晚她报「每句话说了两次」，STT 盲测定的）：
+        //   · next_text 会被 v4 当成要念的话（带后文 5 次里 2 次把下一段开头念了出来，手机再播下一段就重了）→ 不传，参数收下不用
+        //   · 短段裸念会自己把半句重念一遍（4 次里 3 次）；垫一句 "Mm." 当前文压住了大半。通话一句一句念，正是短段，所以没前文时一律垫上。
+        body: JSON.stringify({
+          text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
+          previous_text: prev ? toElevenText(prev).slice(-1000) : 'Mm.',
+        }),
+      });
+      if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
+      return { bytes: await r.arrayBuffer() };
+    };
+    const t = await bestTake(env, spokenCount(toElevenText(text)), once);
+    return { success: true, bytes: t.bytes };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -465,22 +520,28 @@ async function generateElevenMarked(env: Env, text: string, emotion?: string): P
   const lead = e ? e + ' ' : '';
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, {
-      method: 'POST',
-      headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }),
-    });
-    if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
-    const d = await r.json() as any;
-    const al = d.alignment || {};
-    const st: number[] = al.character_start_times_seconds || [], en: number[] = al.character_end_times_seconds || [];
-    const cuts = spans.map(([a, b]) => {
-      const i = a + lead.length, j = b + lead.length;
-      const s0 = st[i], e1 = en[j];
-      return (typeof s0 === 'number' && typeof e1 === 'number') ? (s0 + e1) / 2 : NaN;
-    });
-    if (cuts.some(c => !isFinite(c))) return { success: false, error: 'eleven alignment missing' };
-    return { success: true, audio: d.audio_base64, cuts };
+    const once = async () => {
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }),
+      });
+      if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
+      const d = await r.json() as any;
+      const al = d.alignment || {};
+      const st: number[] = al.character_start_times_seconds || [], en: number[] = al.character_end_times_seconds || [];
+      const cuts = spans.map(([a, b]) => {
+        const i = a + lead.length, j = b + lead.length;
+        const s0 = st[i], e1 = en[j];
+        return (typeof s0 === 'number' && typeof e1 === 'number') ? (s0 + e1) / 2 : NaN;
+      });
+      if (cuts.some(c => !isFinite(c))) throw new Error('eleven alignment missing');
+      const bin = atob(d.audio_base64), bytes = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      return { bytes: bytes.buffer as ArrayBuffer, audio: d.audio_base64 as string, cuts };
+    };
+    const t = await bestTake(env, spokenCount(full), once);
+    return { success: true, audio: t.audio, cuts: t.cuts };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
