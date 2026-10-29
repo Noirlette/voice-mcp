@@ -428,12 +428,15 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
     const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
       method: 'POST',
       headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
-      // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前后段的字，v4 才接得上语气；
+      // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前一段的字，v4 才接得上语气；
       // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
+      // KEKE_ELEVEN_NOREPEAT_V1（同一晚她报「每句话说了两次」，STT 盲测定的）：
+      //   · next_text 会被 v4 当成要念的话（带后文 5 次里 2 次把下一段开头念了出来，手机再播下一段就重了）→ 不传，参数收下不用
+      //   · 短段裸念会自己把半句重念一遍（4 次里 3 次）；垫一句 "Mm." 当前文就压住了（8 次全对）。长段两种都没事。
+      //   通话是一句一句念的，正是短段，所以没前文时一律垫上。
       body: JSON.stringify({
         text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
-        ...(prev ? { previous_text: toElevenText(prev).slice(-1000) } : {}),
-        ...(next ? { next_text: toElevenText(next).slice(0, 1000) } : {}),
+        previous_text: prev ? toElevenText(prev).slice(-1000) : 'Mm.',
       }),
     });
     if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
