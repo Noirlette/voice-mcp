@@ -570,7 +570,8 @@ export default {
       if (r.success && r.bytes) {
         return new Response(r.bytes, { headers: { ...corsHeaders, 'Content-Type': 'audio/mpeg', 'Content-Disposition': 'inline; filename="voice.mp3"' } });
       }
-      return Response.json({ error: r.error }, { status: 502, headers: corsHeaders });
+      // KEKE_ELEVEN_429_V1：Eleven 限并发（免费档同时只给 2 个），如实回 429，手机等一下重试，别直接换 MiniMax
+      return Response.json({ error: r.error }, { status: /^eleven 429/.test(r.error || '') ? 429 : 502, headers: corsHeaders });
     }
 
     // Direct audio API
