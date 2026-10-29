@@ -440,9 +440,14 @@ async function sttCount(env: Env, bytes: ArrayBuffer): Promise<number | null> {
   const base = (env.STT_URL || 'https://stt.nyx-claude.com').replace(/\/+$/, '');
   const auth = { Authorization: 'Bearer ' + env.STT_KEY };
   try {
-    const fd = new FormData();
-    fd.append('audio', new Blob([bytes], { type: 'audio/mpeg' }), 'v.mp3');
-    const up = await fetch(base + '/upload', { method: 'POST', headers: auth, body: fd, signal: AbortSignal.timeout(8000) });
+    // 💀 别用 FormData：Workers 把它当流发（chunked、没有 Content-Length），voce-stt 的 cgi.FieldStorage
+    //    拿不到长度就干等到超时——第一版验了个寂寞（日志：aborted due to timeout，验证全被跳过）。自己拼好整块再发。
+    const boundary = 'kekeverify' + Date.now();
+    const head = new TextEncoder().encode(`--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="v.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`);
+    const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+    const body = new Uint8Array(head.length + bytes.byteLength + tail.length);
+    body.set(head, 0); body.set(new Uint8Array(bytes), head.length); body.set(tail, head.length + bytes.byteLength);
+    const up = await fetch(base + '/upload', { method: 'POST', headers: { ...auth, 'Content-Type': 'multipart/form-data; boundary=' + boundary }, body, signal: AbortSignal.timeout(8000) });
     if (!up.ok) { console.log('[verify] stt upload ' + up.status + ' ' + (await up.text()).slice(0, 120)); return null; }
     const fn = ((await up.json()) as any).filename;
     const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
