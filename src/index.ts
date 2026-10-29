@@ -27,6 +27,9 @@ export interface Env {
   ELEVEN_API_KEY?: string;
   ELEVEN_VOICE_ID?: string;
   ELEVEN_MODEL?: string;
+  // KEKE_ELEVEN_VERIFY_V1：念完转写一遍核对（跳板机 voce-stt），没配就不验
+  STT_URL?: string;
+  STT_KEY?: string;
 }
 
 interface T2AResponse {
@@ -421,25 +424,143 @@ export function toElevenText(text: string, emotion?: string): string {
   const e = emotion && ELEVEN_EMOTION[emotion];
   return e ? e + ' ' + t : t;
 }
+// KEKE_ELEVEN_VERIFY_V1（2026-10-29 夜）：v4 念带大量省略号/拟声的台词时，三四成会自己出岔子——
+// 把半句重念一遍、或者吞掉结尾（她报「每句话说了两次」，拿她那条原文 STT 盲测坐实的）。
+// 改写法压不住，所以念完转写一遍、跟原文对词数：多两成＝重复、少三成＝吞字 → 重念，最多三遍，都不行交最接近的。
+// 转写挂了就不验、照常交出去：宁可偶尔重一句，不能因为验不了就不出声。
+const VOCAL_RE = /^(m+h?|h+m+|h+n+h?|n+g*h+|h+h*|ha+h*|a+h+|o+h+|u+h+|e+h+|mm+h*)$/i;
+function spokenWords(text: string): string[] {
+  const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ').replace(/\([a-z -]+\)/gi, ' ');
+  const cjk = t.match(/[一-鿿]/g) || [];
+  const words = t.replace(/[一-鿿]/g, ' ').toLowerCase().replace(/'/g, '').split(/[^a-z0-9]+/).filter(w => w && !VOCAL_RE.test(w));
+  return words.concat(cjk);
+}
+async function sttWords(env: Env, bytes: ArrayBuffer): Promise<string[] | null> {
+  if (!env.STT_KEY) return null;
+  const base = (env.STT_URL || 'https://stt.nyx-claude.com').replace(/\/+$/, '');
+  const auth = { Authorization: 'Bearer ' + env.STT_KEY };
+  try {
+    // 💀 别用 FormData：Workers 把它当流发（chunked、没有 Content-Length），voce-stt 的 cgi.FieldStorage
+    //    拿不到长度就干等到超时——第一版验了个寂寞（日志：aborted due to timeout，验证全被跳过）。自己拼好整块再发。
+    const boundary = 'kekeverify' + Date.now();
+    const head = new TextEncoder().encode(`--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="v.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`);
+    const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+    const body = new Uint8Array(head.length + bytes.byteLength + tail.length);
+    body.set(head, 0); body.set(new Uint8Array(bytes), head.length); body.set(tail, head.length + bytes.byteLength);
+    const up = await fetch(base + '/upload', { method: 'POST', headers: { ...auth, 'Content-Type': 'multipart/form-data; boundary=' + boundary }, body, signal: AbortSignal.timeout(8000) });
+    if (!up.ok) { console.log('[verify] stt upload ' + up.status + ' ' + (await up.text()).slice(0, 120)); return null; }
+    const fn = ((await up.json()) as any).filename;
+    const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
+    if (!st.ok) { console.log('[verify] stt ' + st.status); return null; }
+    return spokenWords(((await st.json()) as any).text || '');
+  } catch (e) { console.log('[verify] stt failed: ' + (e instanceof Error ? e.message : String(e))); return null; }
+}
+// 💀 只数词数不够（第二版放过了一条又重复又缺尾巴、词数刚好凑平的）：还要看内容——
+//   · 转写里冒出原文没有的「同一对词出现两次」＝重念了一截
+//   · 原文的词在转写里找得到的不到八成＝吞了一截（STT 会把 Noirlette 听成 Nette，所以留两成余量）
+//   · 词数上下各两成
+// 返回 0＝好，越大越离谱；null＝验不了（没配 STT / 失败 / 太短没得比）
+function takeScore(exp: string[], got: string[] | null): number | null {
+  if (!got || exp.length < 4) return null;
+  const bigrams = (w: string[]) => { const m = new Map<string, number>(); for (let i = 0; i + 1 < w.length; i++) { const k = w[i] + ' ' + w[i + 1]; m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const be = bigrams(exp), bg = bigrams(got);
+  let dup = 0;
+  bg.forEach((n, k) => { if (n > (be.get(k) || 0) && n > 1) dup += n - Math.max(1, be.get(k) || 0); });
+  const gs = new Set(got);
+  const recall = exp.filter(w => gs.has(w)).length / exp.length;
+  const ratio = got.length / exp.length;
+  return dup * 0.5 + Math.max(0, 0.8 - recall) * 2 + Math.max(0, Math.abs(ratio - 1) - 0.2);
+}
+const VERIFY_TAKES = 3;
+async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: string[], once: () => Promise<T>): Promise<T> {
+  let best: T | null = null, bestScore = Infinity;
+  for (let i = 0; i < VERIFY_TAKES; i++) {
+    const t = await once();
+    const got = await sttWords(env, t.bytes);
+    let sc = takeScore(expected, got);
+    // 字都对、却在省略号上停太久（同一条正常 16 秒，拖成 32 秒、一大段一大段空白）：转写看不出空白，按时长补一刀。
+    // 这种写法正常每词 0.5~0.65 秒；上限每词 0.95 秒再加 3 秒。mp3_44100_128 是定码率，字节 / 16000 ＝ 秒。
+    const secs = t.bytes.byteLength / 16000, cap = expected.length * 0.95 + 3;
+    if (sc != null && expected.length >= 4 && secs > cap) sc += (secs - cap) / cap;
+    console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected.length} 词，转写 ${got ? got.length : null}，${secs.toFixed(1)} 秒（上限 ${cap.toFixed(1)}），分 ${sc == null ? '不验' : sc.toFixed(2)}`);
+    if (sc == null || sc === 0) return t;
+    if (sc < bestScore) { best = t; bestScore = sc; }
+  }
+  console.log(`[verify] ${VERIFY_TAKES} 遍都不对，交最接近的（分 ${bestScore.toFixed(2)}）`);
+  return best as T;
+}
+
 async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
-    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
-      method: 'POST',
-      headers: { 'xi-api-key': env.ELEVEN_API_KEY, 'Content-Type': 'application/json' },
-      // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前后段的字，v4 才接得上语气；
-      // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
-      body: JSON.stringify({
-        text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
-        ...(prev ? { previous_text: toElevenText(prev).slice(-1000) } : {}),
-        ...(next ? { next_text: toElevenText(next).slice(0, 1000) } : {}),
-      }),
-    });
-    if (!r.ok) return { success: false, error: 'eleven ' + r.status + ': ' + (await r.text()).slice(0, 300) };
-    return { success: true, bytes: await r.arrayBuffer() };
+    const once = async () => {
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+        // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前一段的字，v4 才接得上语气；
+        // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
+        // KEKE_ELEVEN_NOREPEAT_V1（同一晚她报「每句话说了两次」，STT 盲测定的）：
+        //   · next_text 会被 v4 当成要念的话（带后文 5 次里 2 次把下一段开头念了出来，手机再播下一段就重了）→ 不传，参数收下不用
+        //   · 短段裸念会自己把半句重念一遍（4 次里 3 次）；垫一句 "Mm." 当前文压住了大半。通话一句一句念，正是短段，所以没前文时一律垫上。
+        body: JSON.stringify({
+          text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
+          previous_text: prev ? toElevenText(prev).slice(-1000) : 'Mm.',
+        }),
+      });
+      if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
+      return { bytes: await r.arrayBuffer() };
+    };
+    const t = await bestTake(env, spokenWords(toElevenText(text)), once);
+    return { success: true, bytes: t.bytes };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// KEKE_ELEVEN_ONETAKE_V1（2026-10-29 夜）：带吻的语音整段一口气念，不再切短段。
+// 切成短段时 v4 会自己往下乱接（重念半句、把 "Noirlette" 拖成 ette-ette-ette）；整段一次念 16 次一次没出过事。
+// 手机在要插吻的地方放 ␟（␟），这里换成一段停顿、一次念完，再按 with-timestamps 的逐字时间
+// 算出每个停顿的中点交回去，手机在那儿剪开插吻。
+const MARK = '␟';
+const MARK_PAUSE = '\n';
+async function generateElevenMarked(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio?: string; cuts?: number[]; error?: string }> {
+  if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
+  const pieces = String(text || '').split(MARK).map(p => toElevenText(p));
+  let full = '';
+  const spans: [number, number][] = [];
+  pieces.forEach((p, i) => {
+    if (i > 0) { const a = full.length; full += MARK_PAUSE; spans.push([a, full.length - 1]); }
+    full += p;
+  });
+  const e = emotion && ELEVEN_EMOTION[emotion];
+  const lead = e ? e + ' ' : '';
+  try {
+    const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
+    const once = async () => {
+      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }),
+      });
+      if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
+      const d = await r.json() as any;
+      const al = d.alignment || {};
+      const st: number[] = al.character_start_times_seconds || [], en: number[] = al.character_end_times_seconds || [];
+      const cuts = spans.map(([a, b]) => {
+        const i = a + lead.length, j = b + lead.length;
+        const s0 = st[i], e1 = en[j];
+        return (typeof s0 === 'number' && typeof e1 === 'number') ? (s0 + e1) / 2 : NaN;
+      });
+      if (cuts.some(c => !isFinite(c))) throw new Error('eleven alignment missing');
+      const bin = atob(d.audio_base64), bytes = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      return { bytes: bytes.buffer as ArrayBuffer, audio: d.audio_base64 as string, cuts };
+    };
+    const t = await bestTake(env, spokenWords(full), once);
+    return { success: true, audio: t.audio, cuts: t.cuts };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -560,6 +681,15 @@ export default {
         voice_id: env.VOICE_ID ? 'configured' : 'not configured',
         eleven: env.ELEVEN_API_KEY ? 'configured' : 'not configured',
       }, { headers: corsHeaders });
+    }
+
+    // KEKE_ELEVEN_ONETAKE_V1：整段一次念，回 {audio(base64 mp3), cuts(秒)}
+    if (path === '/speak/eleven-marked' && request.method === 'GET') {
+      const text = url.searchParams.get('text');
+      if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
+      const r = await generateElevenMarked(env, text, url.searchParams.get('emotion') || undefined);
+      if (r.success) return Response.json({ audio: r.audio, cuts: r.cuts }, { headers: corsHeaders });
+      return Response.json({ error: r.error }, { status: /^eleven 429/.test(r.error || '') ? 429 : 502, headers: corsHeaders });
     }
 
     // ElevenLabs v4 (KEKE_ELEVEN_V1)：同 /speak 的参数，speed 收下不用
