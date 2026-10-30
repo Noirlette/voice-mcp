@@ -327,6 +327,18 @@ function getPlayerHTML(botName: string): string {
     
     sendToHost('ui/initialize', { name: 'voice-mcp', version: '1.0.0' }, 1);
     setTimeout(function() { sendToHost('ui/notifications/initialized', {}); }, 50);
+
+    // KEKE_MCP_RESIZE_V1（2026-10-30 她报「小卡片展不开了」）：点开原文，卡片的高度不会自己变，
+    // 得告诉宿主现在多高，不然展开的那段被裁在卡片外面
+    let lastH = 0;
+    function reportSize() {
+      const h = Math.ceil(document.documentElement.scrollHeight);
+      if (h === lastH) return;
+      lastH = h;
+      sendToHost('ui/notifications/size-changed', { height: h });
+    }
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(reportSize).observe(document.body);
+    document.addEventListener('click', function() { setTimeout(reportSize, 0); });
   </script>
 </body>
 </html>`;
