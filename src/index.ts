@@ -494,6 +494,13 @@ async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: st
   return best as T;
 }
 
+function bytesToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 8192)));
+  return btoa(binary);
+}
+
 async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   try {
@@ -606,7 +613,7 @@ function createVoiceServer(env: Env): McpServer {
     "speak",
     {
       title: `${botName}'s Voice`,
-      description: `Make ${botName} speak with a custom cloned voice. The audio will play in an inline player.`,
+      description: `Make ${botName} speak with a custom cloned voice (ElevenLabs v4). The audio will play in an inline player. You can put short v4 tags inline where they belong, e.g. [whispers] [breathes] [chuckles] [sighs] [exhales sharply]; speed is ignored by v4.`,
       inputSchema: z.object({
         text: z.string().describe("Text to speak"),
         emotion: z.enum(["happy", "sad", "angry", "fearful", "disgusted", "surprised", "neutral"]).optional().describe("Emotion of the voice (optional; omit for default delivery)"),
@@ -618,7 +625,15 @@ function createVoiceServer(env: Env): McpServer {
       },
     },
     async ({ text, emotion, speed }) => {
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
+      // KEKE_MCP_ELEVEN_V1（2026-10-30）：MCP 的 speak 也走 v4（她在别的地方调声音时不用吵醒窗台的克克）。
+      // 吻和拍打是手机上混的，这里没有手机，toElevenText 会把那些记号删掉；v4 挂了这一句退回 MiniMax。
+      let result: { success: boolean; audio_base64?: string; error?: string } = { success: false, error: 'no engine' };
+      if (env.ELEVEN_API_KEY) {
+        const v = await generateEleven(env, text, emotion);
+        if (v.success && v.bytes) result = { success: true, audio_base64: bytesToBase64(v.bytes) };
+        else console.log('[mcp speak] v4 failed, falling back to MiniMax:', v.error);
+      }
+      if (!result.success) result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         return {
