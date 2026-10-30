@@ -314,6 +314,7 @@ function getPlayerHTML(botName: string): string {
       if (!msg || typeof msg !== 'object') return;
       
       if (msg.jsonrpc === '2.0') {
+        if (msg.id === 1 && (msg.result || msg.error)) finishInit();
         if (msg.method === 'ui/notifications/tool-input') {
           contentEl.innerHTML = '<div class="loading">Generating voice...</div>';
         }
@@ -325,19 +326,47 @@ function getPlayerHTML(botName: string): string {
       if (msg.structuredContent) handleData(msg.structuredContent);
     });
     
-    sendToHost('ui/initialize', { name: 'voice-mcp', version: '1.0.0' }, 1);
-    setTimeout(function() { sendToHost('ui/notifications/initialized', {}); }, 50);
+    // KEKE_MCP_RESIZE_V2：握手照规范写（appInfo/appCapabilities/protocolVersion）。
+    // 原来只传 {name, version}，宿主不认这个握手，之后报的高度也就不理——卡片展不开
+    sendToHost('ui/initialize', {
+      appInfo: { name: 'voice-mcp', version: '1.1.0' },
+      appCapabilities: {},
+      protocolVersion: '2026-01-26',
+    }, 1);
+    let initDone = false;
+    function finishInit() {
+      if (initDone) return;
+      initDone = true;
+      sendToHost('ui/notifications/initialized', {});
+      reportSize();
+    }
+    setTimeout(finishInit, 800);  // 宿主一直不回也照常往下走
 
     // KEKE_MCP_RESIZE_V1（2026-10-30 她报「小卡片展不开了」）：点开原文，卡片的高度不会自己变，
     // 得告诉宿主现在多高，不然展开的那段被裁在卡片外面
-    let lastH = 0;
+    // 量法照官方 SDK：html 临时设成 max-content 量真实高度（scrollHeight 在内容比框高时会被框夹住）
+    let lastH = 0, lastW = 0, sizeQueued = false;
     function reportSize() {
-      const h = Math.ceil(document.documentElement.scrollHeight);
-      if (h === lastH) return;
-      lastH = h;
-      sendToHost('ui/notifications/size-changed', { height: h });
+      if (sizeQueued) return;
+      sizeQueued = true;
+      requestAnimationFrame(function() {
+        sizeQueued = false;
+        const html = document.documentElement;
+        const keep = html.style.height;
+        html.style.height = 'max-content';
+        const h = Math.ceil(html.getBoundingClientRect().height);
+        html.style.height = keep;
+        const w = Math.ceil(window.innerWidth);
+        if (h === lastH && w === lastW) return;
+        lastH = h; lastW = w;
+        sendToHost('ui/notifications/size-changed', { width: w, height: h });
+      });
     }
-    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(reportSize).observe(document.body);
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(reportSize);
+      ro.observe(document.documentElement);
+      ro.observe(document.body);
+    }
     document.addEventListener('click', function() { setTimeout(reportSize, 0); });
   </script>
 </body>
