@@ -448,6 +448,8 @@ const ELEVEN_TAGS: Record<string, string> = {
   'sneezes': '[sneezes]', 'burps': '', 'applause': '', 'pant': '[panting]',
   'whistles': '[whistles]', 'crying': '[crying]',
   // KEKE_VOICE_FX_V1：吻和水声是手机上混进去的，这里只防老缓存把它们送过来被念出来
+  // KEKE_VOICE_CLIMAX_V1 / MOOD / SPILL：手机插的那几声，漏到这儿就别念出来
+  'climb': '', 'moan': '', 'peak': '', 'cum': '', 'spent': '', 'pee': '', 'spill': '', 'rough': '', 'climb-rough': '', 'moan-rough': '',
   'kiss': '', 'kisses': '', 'wet': '', 'slap': '', 'slap-slow': '', 'slap-fast': '', 'slap-faster': '', 'slap-wet': '', 'slap-deep': '', 'spank': '',
   // KEKE_VOICE_BREATH_V1：喘、哼、停顿也是手机插的真声音，v4 一个都不念
   'mm': '', 'hnn': '', 'haah': '', 'hh': '', 'groan': '', 'pause': '',
@@ -473,7 +475,14 @@ export function toElevenText(text: string, emotion?: string): string {
 // 把半句重念一遍、或者吞掉结尾（她报「每句话说了两次」，拿她那条原文 STT 盲测坐实的）。
 // 改写法压不住，所以念完转写一遍、跟原文对词数：多两成＝重复、少三成＝吞字 → 重念，最多三遍，都不行交最接近的。
 // 转写挂了就不验、照常交出去：宁可偶尔重一句，不能因为验不了就不出声。
-const VOCAL_RE = /^(m+h?|h+m+|h+n+h?|n+g*h+|h+h*|ha+h*|a+h+|o+h+|u+h+|e+h+|mm+h*)$/i;
+// KEKE_VERIFY_VOCAL_V2（11-02）：最后那几下改成他自己演之后，凶的那边多了低吼和喷气——grr / hff / mmrgh / ugh 也不算该说的词
+const VOCAL_RE = /^(m+h?|h+m+|h+n+h?|n+g*h+|h+h*|ha+h*|a+h+|o+h+|u+h+|e+h+|mm+h*|g+r+h*|h+f+|m+r+g+h*|u+g+h*|n+g+h+)$/i;
+// 喘和叫不算词，却实实在在占时间：时长上限按每一声多给一点
+function vocalCount(text: string): number {
+  const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ').replace(/\([a-z -]+\)/gi, ' ').toLowerCase().replace(/'/g, '');
+  return t.split(/[^a-z0-9]+/).filter(w => w && VOCAL_RE.test(w)).length;
+}
+const VOCAL_SECS = 0.6;
 function spokenWords(text: string): string[] {
   const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ').replace(/\([a-z -]+\)/gi, ' ');
   const cjk = t.match(/[一-鿿]/g) || [];
@@ -517,7 +526,7 @@ function takeScore(exp: string[], got: string[] | null): number | null {
   return dup * 0.5 + Math.max(0, 0.8 - recall) * 2 + Math.max(0, Math.abs(ratio - 1) - 0.2);
 }
 const VERIFY_TAKES = 3;
-async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: string[], once: () => Promise<T>): Promise<T> {
+async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: string[], once: () => Promise<T>, vocals = 0): Promise<T> {
   let best: T | null = null, bestScore = Infinity;
   for (let i = 0; i < VERIFY_TAKES; i++) {
     const t = await once();
@@ -525,7 +534,7 @@ async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: st
     let sc = takeScore(expected, got);
     // 字都对、却在省略号上停太久（同一条正常 16 秒，拖成 32 秒、一大段一大段空白）：转写看不出空白，按时长补一刀。
     // 这种写法正常每词 0.5~0.65 秒；上限每词 0.95 秒再加 3 秒。mp3_44100_128 是定码率，字节 / 16000 ＝ 秒。
-    const secs = t.bytes.byteLength / 16000, cap = expected.length * 0.95 + 3;
+    const secs = t.bytes.byteLength / 16000, cap = expected.length * 0.95 + 3 + vocals * VOCAL_SECS;
     if (sc != null && expected.length >= 4 && secs > cap) sc += (secs - cap) / cap;
     console.log(`[verify] 第 ${i + 1} 遍：期望 ${expected.length} 词，转写 ${got ? got.length : null}，${secs.toFixed(1)} 秒（上限 ${cap.toFixed(1)}），分 ${sc == null ? '不验' : sc.toFixed(2)}`);
     if (sc == null || sc === 0) return t;
@@ -563,7 +572,7 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
       if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
       return { bytes: await r.arrayBuffer() };
     };
-    const t = await bestTake(env, spokenWords(toElevenText(text)), once);
+    const t = await bestTake(env, spokenWords(toElevenText(text)), once, vocalCount(toElevenText(text)));
     return { success: true, bytes: t.bytes };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -609,7 +618,7 @@ async function generateElevenMarked(env: Env, text: string, emotion?: string): P
       for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
       return { bytes: bytes.buffer as ArrayBuffer, audio: d.audio_base64 as string, cuts };
     };
-    const t = await bestTake(env, spokenWords(full), once);
+    const t = await bestTake(env, spokenWords(full), once, vocalCount(full));
     return { success: true, audio: t.audio, cuts: t.cuts };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
@@ -674,7 +683,7 @@ function createVoiceServer(env: Env): McpServer {
         if (v.success && v.bytes) result = { success: true, audio_base64: bytesToBase64(v.bytes) };
         else console.log('[mcp speak] v4 failed, falling back to MiniMax:', v.error);
       }
-      if (!result.success) result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
+      if (!result.success) result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         return {
@@ -780,7 +789,7 @@ export default {
       const speedParam = parseFloat(url.searchParams.get('speed') || '');
       const speed = (speedParam >= 0.5 && speedParam <= 2.0) ? speedParam : undefined;
 
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
