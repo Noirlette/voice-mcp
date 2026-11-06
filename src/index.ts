@@ -746,6 +746,8 @@ export default {
       const k = env.ACCESS_KEY;
       if (path === '/' + k || path.startsWith('/' + k + '/')) {
         path = path.slice(k.length + 1) || '/';
+        // MCP 那个库只认地址正好是 /mcp（options.route ?? "/mcp"），把钥匙那段拿掉再交给它
+        request = new Request(url.origin + path + url.search, request);
       } else {
         const hdr = request.headers.get('X-Voice-Key') || '';
         if (!sameKey(hdr, k)) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
