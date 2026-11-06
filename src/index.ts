@@ -30,6 +30,17 @@ export interface Env {
   // KEKE_ELEVEN_VERIFY_V1：念完转写一遍核对（跳板机 voce-stt），没配就不验
   STT_URL?: string;
   STT_KEY?: string;
+  // KEKE_VOICE_LOCK_V1（2026-11-06）：设了就上锁。钥匙放地址里 /<钥匙>/mcp（给 Claude.ai），
+  // 或者请求头 X-Voice-Key（窗台走 VPS1 nginx 的 /voice/，由 nginx 替前端带上）。secret，不进仓
+  ACCESS_KEY?: string;
+}
+
+// KEKE_VOICE_LOCK_V1：等长逐字比，不让响应时间泄露钥匙对了几位
+function sameKey(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
 }
 
 interface T2AResponse {
@@ -718,16 +729,29 @@ function createVoiceServer(env: Env): McpServer {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Voice-Key',
 };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname;
+    let path = url.pathname;
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
+    }
+
+    // KEKE_VOICE_LOCK_V1（2026-11-06）：11-06 有人拿到了带地址的连接器名单，这里原来谁都能用来念、花她的额度
+    if (env.ACCESS_KEY) {
+      const k = env.ACCESS_KEY;
+      if (path === '/' + k || path.startsWith('/' + k + '/')) {
+        path = path.slice(k.length + 1) || '/';
+        // MCP 那个库只认地址正好是 /mcp（options.route ?? "/mcp"），把钥匙那段拿掉再交给它
+        request = new Request(url.origin + path + url.search, request);
+      } else {
+        const hdr = request.headers.get('X-Voice-Key') || '';
+        if (!sameKey(hdr, k)) return new Response('Unauthorized', { status: 401, headers: corsHeaders });
+      }
     }
 
     // MCP Endpoint
