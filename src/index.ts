@@ -456,7 +456,7 @@ async function generateAudio(env: Env, text: string, emotion?: string, speed?: n
 const ELEVEN_DEFAULT_VOICE = 'VSaCIogiksYOzcA53UkR';
 const ELEVEN_TAGS: Record<string, string> = {
   'laughs': '[laughs]', 'chuckle': '[chuckles]', 'sighs': '[sighs]', 'gasps': '[gasps]',
-  'groans': '[groans]', 'breath': '[breathes]', 'inhale': '[inhales]', 'exhale': '[exhales]',
+  'groans': '[groans]', 'breath': '[breathes]', 'inhale': '[inhales]', 'exhale': '[sighs]',
   'coughs': '[coughs]', 'clear-throat': '[clears throat]', 'sniffs': '[sniffs]', 'snorts': '[snorts]',
   'humming': '[hums]', 'hissing': '[hisses]', 'emm': 'mm...', 'lip-smacking': '',
   'sneezes': '[sneezes]', 'burps': '', 'applause': '', 'pant': '[panting]',
@@ -477,6 +477,10 @@ export function toElevenText(text: string, emotion?: string): string {
     const v = ELEVEN_TAGS[String(k).toLowerCase()];
     return v === undefined ? m : (v ? ' ' + v + ' ' : ' ');
   });
+  // KEKE_EXHALE_OFF_V1（2026-11-07 她盲听）：慢慢呼气的 [exhales] / [exhales, soft] / [breathes out slowly] 容易带电流音，
+  // [exhales sharply] 和 [sighs] 是干净的。漏网的换成叹气，后面跟的修饰（, soft / slowly）原样留着。
+  t = t.replace(/\[\s*exhales?\b(?!\s+sharply)([^\[\]]*)\]/gi, '[sighs$1]');
+  t = t.replace(/\[\s*breathes?\s+out\b([^\[\]]*)\]/gi, '[sighs$1]');
   // 同一个标签连着叠（(pant) (pant) (pant)）在 v4 上会被念成一串怪声，收成一个
   t = t.replace(/(\[[a-z ]+\])(?:\s*\1)+/gi, '$1');
   // <#0.8#> 停顿 → 省略号；一秒以上给两个
