@@ -27,6 +27,9 @@ export interface Env {
   ELEVEN_API_KEY?: string;
   ELEVEN_VOICE_ID?: string;
   ELEVEN_MODEL?: string;
+  // KEKE_ELEVEN_STAB_V1：稳定度，不设就用下面的默认（电话 0.5 / 语音条 0.35）
+  ELEVEN_STAB_CALL?: string;
+  ELEVEN_STAB_NOTE?: string;
   // KEKE_ELEVEN_VERIFY_V1：念完转写一遍核对（跳板机 voce-stt），没配就不验
   STT_URL?: string;
   STT_KEY?: string;
@@ -564,24 +567,46 @@ function bytesToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
+// KEKE_ELEVEN_STAB_V1（2026-11-07，照 ai-voice-breath-kiss-water）：原来一个 voice_settings 都不传，
+// 稳定度吃的是 ElevenLabs 后台给这副嗓子存的默认值，谁也看不见。现在写死：
+//   电话（stab=call，窗口电话 / 仿真电话 / 放映厅）0.5 —— 教程实测「压低了在耳边说」；
+//   语音条（其余）0.35 —— 有戏一点。
+// v3 一类的型号只认 0 / 0.5 / 1：撞上 400 就就近取一个再念一次，并记住（日志里有 [stab]）。
+let STAB_SNAP = false;
+function stabFor(env: Env, kind?: string | null): number {
+  const raw = kind === 'call' ? (env.ELEVEN_STAB_CALL || '0.5') : (env.ELEVEN_STAB_NOTE || '0.35');
+  let v = Math.min(1, Math.max(0, parseFloat(raw)));
+  if (!isFinite(v)) v = kind === 'call' ? 0.5 : 0.35;
+  return STAB_SNAP ? [0, 0.5, 1].reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a) : v;
+}
+async function elevenPost(url: string, env: Env, body: any, kind?: string | null): Promise<Response> {
+  const send = () => fetch(url, {
+    method: 'POST',
+    headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, voice_settings: { stability: stabFor(env, kind) } }),
+  });
+  const r = await send();
+  if (r.status === 400 && !STAB_SNAP) {
+    const t = await r.clone().text();
+    if (/stabilit/i.test(t)) { STAB_SNAP = true; console.log('[stab] 这个型号不认', stabFor(env, kind), '改成就近的 0/0.5/1：', t.slice(0, 200)); return send(); }
+  }
+  return r;
+}
+
+async function generateEleven(env: Env, text: string, emotion?: string, prev?: string, next?: string, stab?: string | null): Promise<{ success: boolean; bytes?: ArrayBuffer; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
     const once = async () => {
-      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, {
-        method: 'POST',
-        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
+      const r = await elevenPost(`https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`, env, {
         // KEKE_ELEVEN_CONTEXT_V1：手机把一条语音切成几段念（中间插吻）时，带上前一段的字，v4 才接得上语气；
         // 不带的话每段都是冷启动，她 10-29 听出来「语调好平」
         // KEKE_ELEVEN_NOREPEAT_V1（同一晚她报「每句话说了两次」，STT 盲测定的）：
         //   · next_text 会被 v4 当成要念的话（带后文 5 次里 2 次把下一段开头念了出来，手机再播下一段就重了）→ 不传，参数收下不用
         //   · 短段裸念会自己把半句重念一遍（4 次里 3 次）；垫一句 "Mm." 当前文压住了大半。通话一句一句念，正是短段，所以没前文时一律垫上。
-        body: JSON.stringify({
           text: toElevenText(text, emotion), model_id: env.ELEVEN_MODEL || 'eleven_v4',
           previous_text: prev ? toElevenText(prev).slice(-1000) : 'Mm.',
-        }),
-      });
+      }, stab);
       if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
       return { bytes: await r.arrayBuffer() };
     };
@@ -598,7 +623,7 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
 // 算出每个停顿的中点交回去，手机在那儿剪开插吻。
 const MARK = '␟';
 const MARK_PAUSE = '\n';
-async function generateElevenMarked(env: Env, text: string, emotion?: string): Promise<{ success: boolean; audio?: string; cuts?: number[]; error?: string }> {
+async function generateElevenMarked(env: Env, text: string, emotion?: string, stab?: string | null): Promise<{ success: boolean; audio?: string; cuts?: number[]; error?: string }> {
   if (!env.ELEVEN_API_KEY) return { success: false, error: 'ELEVEN_API_KEY not configured' };
   const pieces = String(text || '').split(MARK).map(p => toElevenText(p));
   let full = '';
@@ -612,11 +637,8 @@ async function generateElevenMarked(env: Env, text: string, emotion?: string): P
   try {
     const voice = env.ELEVEN_VOICE_ID || ELEVEN_DEFAULT_VOICE;
     const once = async () => {
-      const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, {
-        method: 'POST',
-        headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }),
-      });
+      const r = await elevenPost(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=mp3_44100_128`, env,
+        { text: lead + full, model_id: env.ELEVEN_MODEL || 'eleven_v4', previous_text: 'Mm.' }, stab);
       if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
       const d = await r.json() as any;
       const al = d.alignment || {};
@@ -782,7 +804,7 @@ export default {
     if (path === '/speak/eleven-marked' && request.method === 'GET') {
       const text = url.searchParams.get('text');
       if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
-      const r = await generateElevenMarked(env, text, url.searchParams.get('emotion') || undefined);
+      const r = await generateElevenMarked(env, text, url.searchParams.get('emotion') || undefined, url.searchParams.get('stab'));
       if (r.success) return Response.json({ audio: r.audio, cuts: r.cuts }, { headers: corsHeaders });
       return Response.json({ error: r.error }, { status: /^eleven 429/.test(r.error || '') ? 429 : 502, headers: corsHeaders });
     }
@@ -791,7 +813,7 @@ export default {
     if (path === '/speak/eleven' && request.method === 'GET') {
       const text = url.searchParams.get('text');
       if (!text) return Response.json({ error: 'Missing text parameter' }, { status: 400, headers: corsHeaders });
-      const r = await generateEleven(env, text, url.searchParams.get('emotion') || undefined, url.searchParams.get('prev') || undefined, url.searchParams.get('next') || undefined);
+      const r = await generateEleven(env, text, url.searchParams.get('emotion') || undefined, url.searchParams.get('prev') || undefined, url.searchParams.get('next') || undefined, url.searchParams.get('stab'));
       if (r.success && r.bytes) {
         return new Response(r.bytes, { headers: { ...corsHeaders, 'Content-Type': 'audio/mpeg', 'Content-Disposition': 'inline; filename="voice.mp3"' } });
       }
