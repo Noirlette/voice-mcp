@@ -464,6 +464,8 @@ const ELEVEN_TAGS: Record<string, string> = {
   'kiss': '', 'kisses': '', 'wet': '', 'slap': '', 'slap-slow': '', 'slap-fast': '', 'slap-faster': '', 'slap-wet': '', 'slap-deep': '', 'spank': '',
   // KEKE_VOICE_BREATH_V1：喘、哼、停顿也是手机插的真声音，v4 一个都不念
   'mm': '', 'hnn': '', 'haah': '', 'hh': '', 'groan': '', 'pause': '',
+  // KEKE_VOICE_STROKE_V1：他自己弄的手声也是手机垫的
+  'stroke': '', 'stroke-fast': '', 'stroke-faster': '',
 };
 const ELEVEN_EMOTION: Record<string, string> = { sad: '[sad]', angry: '[angry]', fearful: '[nervous]' };
 export function toElevenText(text: string, emotion?: string): string {
@@ -694,7 +696,7 @@ function createVoiceServer(env: Env): McpServer {
         if (v.success && v.bytes) result = { success: true, audio_base64: bytesToBase64(v.bytes) };
         else console.log('[mcp speak] v4 failed, falling back to MiniMax:', v.error);
       }
-      if (!result.success) result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
+      if (!result.success) result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?|stroke(?:-fast|-faster)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         return {
@@ -813,7 +815,7 @@ export default {
       const speedParam = parseFloat(url.searchParams.get('speed') || '');
       const speed = (speedParam >= 0.5 && speedParam <= 2.0) ? speedParam : undefined;
 
-      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
+      const result = await generateAudio(env, text.replace(/\((?:kiss(?:es)?|spank|wet|mm|hnn|haah|hh|groan|pause|rough|climb(?:-rough)?|moan(?:-rough)?|peak|cum|spent|pee|spill|slap(?:-slow|-fast|-faster|-wet|-deep)?|stroke(?:-fast|-faster)?)\)/gi, ' ').replace(/\[(?!\[)[A-Za-z][^\[\]\n]{0,240}\](?!\])/g, ' '), emotion, speed);  // KEKE_VOICE_FX_V1 / KEKE_ELEVEN_DIRECTIONS_V1：(kiss)/(wet)/[导演说明] MiniMax 会念出来
       
       if (result.success && result.audio_base64) {
         const binaryString = atob(result.audio_base64);
