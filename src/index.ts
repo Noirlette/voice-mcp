@@ -27,7 +27,7 @@ export interface Env {
   ELEVEN_API_KEY?: string;
   ELEVEN_VOICE_ID?: string;
   ELEVEN_MODEL?: string;
-  // KEKE_ELEVEN_STAB_V1：稳定度，不设就用下面的默认（电话 0.5 / 语音条 0.35）
+  // KEKE_ELEVEN_STAB_V2：稳定度，不设＝不传（用后台存的）；设了才传，0~1
   ELEVEN_STAB_CALL?: string;
   ELEVEN_STAB_NOTE?: string;
   // KEKE_ELEVEN_VERIFY_V1：念完转写一遍核对（跳板机 voce-stt），没配就不验
@@ -567,26 +567,26 @@ function bytesToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-// KEKE_ELEVEN_STAB_V1（2026-11-07，照 ai-voice-breath-kiss-water）：原来一个 voice_settings 都不传，
-// 稳定度吃的是 ElevenLabs 后台给这副嗓子存的默认值，谁也看不见。现在写死：
-//   电话（stab=call，窗口电话 / 仿真电话 / 放映厅）0.5 —— 教程实测「压低了在耳边说」；
-//   语音条（其余）0.35 —— 有戏一点。
-// v3 一类的型号只认 0 / 0.5 / 1：撞上 400 就就近取一个再念一次，并记住（日志里有 [stab]）。
+// KEKE_ELEVEN_STAB_V2（2026-11-07 同一晚）：V1 写死了电话 0.5 / 语音条 0.35，她听了说「反而有点怪怪的」。
+// 退回默认＝不传 voice_settings（吃 ElevenLabs 后台给这副嗓子存的那套，V1 之前一直是这样，她听着是好的）。
+// 只传 stability 时，没写的 similarity/style 也可能被换成接口默认值，所以「只调一根」其实不只动了一根。
+// 想再试：在 Cloudflare 后台给 Worker 设变量 ELEVEN_STAB_CALL / ELEVEN_STAB_NOTE（0~1），不用改代码；删掉变量就回到默认。
 let STAB_SNAP = false;
-function stabFor(env: Env, kind?: string | null): number {
-  const raw = kind === 'call' ? (env.ELEVEN_STAB_CALL || '0.5') : (env.ELEVEN_STAB_NOTE || '0.35');
-  let v = Math.min(1, Math.max(0, parseFloat(raw)));
-  if (!isFinite(v)) v = kind === 'call' ? 0.5 : 0.35;
+function stabFor(env: Env, kind?: string | null): number | null {
+  const raw = kind === 'call' ? env.ELEVEN_STAB_CALL : env.ELEVEN_STAB_NOTE;
+  if (raw == null || String(raw).trim() === '') return null;
+  const v = Math.min(1, Math.max(0, parseFloat(String(raw))));
+  if (!isFinite(v)) return null;
   return STAB_SNAP ? [0, 0.5, 1].reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a) : v;
 }
 async function elevenPost(url: string, env: Env, body: any, kind?: string | null): Promise<Response> {
   const send = () => fetch(url, {
     method: 'POST',
     headers: { 'xi-api-key': env.ELEVEN_API_KEY as string, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, voice_settings: { stability: stabFor(env, kind) } }),
+    body: JSON.stringify(stabFor(env, kind) == null ? body : { ...body, voice_settings: { stability: stabFor(env, kind) } }),
   });
   const r = await send();
-  if (r.status === 400 && !STAB_SNAP) {
+  if (r.status === 400 && !STAB_SNAP && stabFor(env, kind) != null) {
     const t = await r.clone().text();
     if (/stabilit/i.test(t)) { STAB_SNAP = true; console.log('[stab] 这个型号不认', stabFor(env, kind), '改成就近的 0/0.5/1：', t.slice(0, 200)); return send(); }
   }
