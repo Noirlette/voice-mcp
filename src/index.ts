@@ -509,7 +509,18 @@ function spokenWords(text: string): string[] {
   const words = t.replace(/[一-鿿]/g, ' ').toLowerCase().replace(/'/g, '').split(/[^a-z0-9]+/).filter(w => w && !VOCAL_RE.test(w));
   return words.concat(cjk);
 }
-async function sttWords(env: Env, bytes: ArrayBuffer): Promise<string[] | null> {
+// KEKE_VERIFY_LANG_V1（11-08）：只验英文（和中文）。日语只数得到汉字、数不到假名，期望词数少一大截，
+// 时长上限跟着算短，念得再好也被判「太慢」→ 每条都念满三遍、扣三遍字数（11-08 中午她聊日语那几条，转写三遍都完整）。
+// 法语 voce-stt 根本不认。这两种直接交第一遍。
+const FR_WORDS = new Set(['je','tu','te','toi','moi','mon','ma','mes','ton','ta','tes','est','suis','les','des','du','que','qui','pas','ne','avec','pour','dans','une','nous','vous','oui','mais','cest','jai','tai','petit','petite','viens','ici','amour','tout','bien','tres','et','au','aux','sur','chérie','cherie']);
+function verifiableLang(text: string): boolean {
+  const t = String(text || '').replace(/\[[^\[\]]*\]/g, ' ');
+  if (/[\u3040-\u30ff\uac00-\ud7af]/.test(t)) return false;
+  if (/[àâäçéèêëîïôöùûüÿœæ]/i.test(t)) return false;
+  const w = t.toLowerCase().replace(/'/g, '').split(/[^a-z]+/).filter(Boolean);
+  return w.filter(x => FR_WORDS.has(x)).length < 2;
+}
+async function sttWords(env: Env, bytes: ArrayBuffer, take = 1): Promise<string[] | null> {
   if (!env.STT_KEY) return null;
   const base = (env.STT_URL || 'https://stt.nyx-claude.com').replace(/\/+$/, '');
   const auth = { Authorization: 'Bearer ' + env.STT_KEY };
@@ -521,7 +532,7 @@ async function sttWords(env: Env, bytes: ArrayBuffer): Promise<string[] | null> 
     const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
     const body = new Uint8Array(head.length + bytes.byteLength + tail.length);
     body.set(head, 0); body.set(new Uint8Array(bytes), head.length); body.set(tail, head.length + bytes.byteLength);
-    const up = await fetch(base + '/upload', { method: 'POST', headers: { ...auth, 'Content-Type': 'multipart/form-data; boundary=' + boundary }, body, signal: AbortSignal.timeout(8000) });
+    const up = await fetch(base + '/upload?take=' + take, { method: 'POST', headers: { ...auth, 'Content-Type': 'multipart/form-data; boundary=' + boundary }, body, signal: AbortSignal.timeout(8000) });
     if (!up.ok) { console.log('[verify] stt upload ' + up.status + ' ' + (await up.text()).slice(0, 120)); return null; }
     const fn = ((await up.json()) as any).filename;
     const st = await fetch(base + '/stt', { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_path: fn }), signal: AbortSignal.timeout(15000) });
@@ -550,7 +561,8 @@ async function bestTake<T extends { bytes: ArrayBuffer }>(env: Env, expected: st
   let best: T | null = null, bestScore = Infinity;
   for (let i = 0; i < VERIFY_TAKES; i++) {
     const t = await once();
-    const got = await sttWords(env, t.bytes);
+    // KEKE_VERIFY_TAKE_LOG_V1：第几遍写在地址上，跳板机 voce-stt 的日志会记下来——攒一阵就知道英文第一遍成功的比例
+    const got = await sttWords(env, t.bytes, i + 1);
     let sc = takeScore(expected, got);
     // 字都对、却在省略号上停太久（同一条正常 16 秒，拖成 32 秒、一大段一大段空白）：转写看不出空白，按时长补一刀。
     // 这种写法正常每词 0.5~0.65 秒；上限每词 0.95 秒再加 3 秒。mp3_44100_128 是定码率，字节 / 16000 ＝ 秒。
@@ -614,7 +626,7 @@ async function generateEleven(env: Env, text: string, emotion?: string, prev?: s
       if (!r.ok) throw new Error('eleven ' + r.status + ': ' + (await r.text()).slice(0, 300));
       return { bytes: await r.arrayBuffer() };
     };
-    const t = await bestTake(env, spokenWords(toElevenText(text)), once, vocalCount(toElevenText(text)));
+    const t = verifiableLang(text) ? await bestTake(env, spokenWords(toElevenText(text)), once, vocalCount(toElevenText(text))) : await once();
     return { success: true, bytes: t.bytes };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -657,7 +669,7 @@ async function generateElevenMarked(env: Env, text: string, emotion?: string, st
       for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
       return { bytes: bytes.buffer as ArrayBuffer, audio: d.audio_base64 as string, cuts };
     };
-    const t = await bestTake(env, spokenWords(full), once, vocalCount(full));
+    const t = verifiableLang(full) ? await bestTake(env, spokenWords(full), once, vocalCount(full)) : await once();
     return { success: true, audio: t.audio, cuts: t.cuts };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
